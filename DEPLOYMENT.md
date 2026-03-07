@@ -22,6 +22,7 @@
 - GitHub Pages
 
 **Backend:**
+- **Hugging Face Spaces (Recommended for PyTorch model)**
 - Railway
 - Render
 - AWS EC2
@@ -105,7 +106,83 @@
 
 ## Backend Deployment
 
-### Option 1: Railway (Recommended)
+### Option 1: Hugging Face Spaces (Recommended for PyTorch Model)
+
+**Perfect for deploying the InceptionV3 + ViT model with Git LFS support for large model files.**
+
+#### Quick Setup:
+
+1. **Prepare Backend Files**:
+   The backend is ready for Hugging Face deployment with:
+   - `backend/app.py` - Entry point (port 7860)
+   - `backend/torch_main.py` - FastAPI application with PyTorch
+   - `backend/requirements.txt` - PyTorch dependencies
+   - `backend/Dockerfile` - Docker configuration
+   - `backend/.gitattributes` - Git LFS configuration
+   - `backend/inception/inceptionv3_vit_lung.pth` - Model weights (~300MB)
+   - `backend/inception/class_mapping (1).json` - Class labels
+
+2. **Deploy to Hugging Face**:
+   
+   **Web Interface (Easiest)**:
+   - Go to https://huggingface.co/new-space
+   - Name: `lung-disease-detection`
+   - SDK: **Docker**
+   - Upload all backend files
+   - Hugging Face automatically builds and deploys
+   
+   **Git CLI**:
+   ```bash
+   # Install Git LFS
+   git lfs install
+   
+   # Clone space
+   git clone https://huggingface.co/spaces/YOUR_USERNAME/lung-disease-detection
+   cd lung-disease-detection
+   
+   # Copy backend files
+   cp -r backend/* .
+   
+   # Track large model file
+   git lfs track "*.pth"
+   git add .gitattributes
+   
+   # Commit and push
+   git add .
+   git commit -m "Deploy InceptionV3 + ViT model"
+   git push
+   ```
+
+3. **Access API**:
+   - URL: `https://YOUR_USERNAME-lung-disease-detection.hf.space`
+   - Health check: `/api/health`
+   - Prediction: `/api/predict`
+   - Chat: `/api/chat`
+
+4. **Test Locally Before Deploying**:
+   ```bash
+   cd backend
+   pip install -r requirements.txt
+   python app.py  # Runs on port 7860
+   python test_api.py  # Run test suite
+   ```
+
+**Advantages**:
+- ✅ Free hosting for public models
+- ✅ Git LFS support for large model files (300MB+)
+- ✅ Docker-based deployment
+- ✅ Automatic builds and deployments
+- ✅ Built-in monitoring and logs
+- ✅ Perfect for ML models
+- ✅ Optional GPU upgrade for faster inference
+
+**Documentation**:
+- Full guide: `backend/README_HUGGINGFACE.md`
+- Quick start: `backend/DEPLOYMENT_QUICK_START.md`
+
+---
+
+### Option 2: Railway
 
 1. **Install Railway CLI**:
    ```bash

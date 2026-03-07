@@ -1,9 +1,9 @@
-# 🫁 Lung Disorder Detection using Hybrid MobileNet + Vision Transformer (ViT)
+ZZZZaaaaaaaaaaaaaaaaaa    A # 🫁 Lung Disorder Detection using Hybrid InceptionV3 + Vision Transformer (ViT)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![React](https://img.shields.io/badge/React-18.2.0-blue.svg)](https://reactjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109.0-green.svg)](https://fastapi.tiangolo.com/)
-[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.15.0-orange.svg)](https://www.tensorflow.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.1.2-orange.svg)](https://pytorch.org/)
 
 > **AI-powered lung disorder detection system for identifying Pneumonia, Tuberculosis, COVID-19, and Normal cases from chest X-ray images.**
 
@@ -31,17 +31,18 @@
 
 ## 🎯 Overview
 
-This project presents a **state-of-the-art AI diagnostic system** for detecting lung disorders from chest X-ray images. The system combines the efficiency of **MobileNetV2** for feature extraction with the global attention capabilities of **Vision Transformers (ViT)** to achieve superior diagnostic accuracy.
+This project presents a **state-of-the-art AI diagnostic system** for detecting lung disorders from chest X-ray images. The system combines the powerful **InceptionV3** architecture for multi-scale feature extraction with the global attention capabilities of **Vision Transformers (ViT)** to achieve superior diagnostic accuracy.
 
 ### Key Highlights
 
-- 🤖 **Hybrid AI Model**: MobileNet + Vision Transformer architecture
-- 🎯 **94.2% Accuracy**: High-performance detection on test datasets
-- ⚡ **Fast Inference**: Results in under 1 second
+- 🤖 **Hybrid AI Model**: InceptionV3 + Vision Transformer architecture (PyTorch)
+- 🎯 **High Accuracy**: Production-ready detection on test datasets
+- ⚡ **Fast Inference**: Results in under 2 seconds
 - 📊 **Detailed Analysis**: Confidence scores and probability distributions
 - 💬 **AI Chatbot**: Interactive medical Q&A assistant
 - 🎨 **Modern UI**: Clean, medical-grade interface
 - 📱 **Responsive Design**: Works on desktop and tablets
+- 🚀 **Hugging Face Ready**: Easy deployment to Hugging Face Spaces
 
 ---
 
@@ -80,21 +81,24 @@ This project presents a **state-of-the-art AI diagnostic system** for detecting 
 ### Hybrid Model Architecture
 
 ```
-Input X-Ray Image (224x224x3)
+Input X-Ray Image (299x299x3)
          ↓
     ┌────┴────┐
     ↓         ↓
-MobileNetV2   Vision Transformer
-(Feature      (Global Attention
-Extraction)   Mechanism)
+InceptionV3   Vision Transformer
+(2048-dim     (768-dim features
+features)     via self-attention)
+299x299       224x224 (resized)
     ↓         ↓
     └────┬────┘
          ↓
-    Fusion Layer
+   Feature Fusion
+   (2816 dimensions)
          ↓
-   Classification
+Fully Connected Layer
          ↓
 4 Classes + Confidence
+(Softmax Activation)
 ```
 
 ### System Architecture
@@ -102,9 +106,10 @@ Extraction)   Mechanism)
 ```
 ┌─────────────┐         ┌─────────────┐         ┌─────────────┐
 │             │         │             │         │             │
-│  React UI   │◄──────►│  FastAPI    │◄──────►│ TensorFlow  │
+│  React UI   │◄──────►│  FastAPI    │◄──────►│  PyTorch    │
 │  (Frontend) │   REST  │  (Backend)  │  Model  │   Model     │
-│             │   API   │             │  Load   │             │
+│             │   API   │             │  Load   │ (InceptionV3│
+│             │         │             │         │   + ViT)    │
 └─────────────┘         └─────────────┘         └─────────────┘
 ```
 
@@ -128,7 +133,8 @@ Extraction)   Mechanism)
 ### Backend
 
 - **FastAPI** - Modern Python web framework
-- **TensorFlow** - Deep learning framework
+- **PyTorch 2.1.2** - Deep learning framework
+- **Transformers (Hugging Face)** - Vision Transformer models
 - **Pillow (PIL)** - Image processing
 - **NumPy** - Numerical computing
 - **Uvicorn** - ASGI server
@@ -136,10 +142,11 @@ Extraction)   Mechanism)
 
 ### AI/ML
 
-- **MobileNetV2** - CNN base model
-- **Vision Transformer (ViT)** - Attention mechanism
-- **TensorFlow/Keras** - Model building and training
-- **OpenCV** - Image preprocessing
+- **InceptionV3** - CNN backbone (2048-dim features)
+- **Vision Transformer (ViT)** - Transformer backbone (768-dim features)
+- **PyTorch/TorchVision** - Model implementation
+- **Hugging Face Transformers** - Pre-trained ViT model (google/vit-base-patch16-224)
+- **Feature Fusion** - Combined CNN + Transformer approach
 
 ---
 
@@ -330,47 +337,92 @@ FastAPI provides automatic interactive API documentation:
 
 ## 🧠 Model Details
 
-### Hybrid MobileNet + Vision Transformer
+### Hybrid InceptionV3 + Vision Transformer
 
-#### MobileNetV2 Component
-- **Purpose**: Efficient feature extraction
-- **Architecture**: Depthwise separable convolutions
+#### InceptionV3 Component
+- **Purpose**: Multi-scale feature extraction via inception modules
+- **Architecture**: Efficient CNN with auxiliary classifiers
+- **Features Extracted**: 2048-dimensional feature vector
+- **Input Size**: 299×299 pixels
 - **Advantages**: 
-  - Lightweight (suitable for deployment)
-  - Pre-trained on ImageNet
-  - Good local feature extraction
+  - Pre-trained on ImageNet (strong transfer learning)
+  - Multi-scale convolutions (1×1, 3×3, 5×5)
+  - Captures local patterns and textures efficiently
+  - Proven performance on medical imaging tasks
 
-#### Vision Transformer Component
-- **Purpose**: Global attention and context
-- **Architecture**: Self-attention mechanism on image patches
+#### Vision Transformer (ViT) Component
+- **Model**: google/vit-base-patch16-224-in21k (Hugging Face)
+- **Purpose**: Global attention and contextual understanding
+- **Architecture**: Self-attention mechanism on 16×16 image patches
+- **Features Extracted**: 768-dimensional pooled output
+- **Input Size**: 224×224 pixels (resized internally from 299×299)
 - **Advantages**:
-  - Captures long-range dependencies
+  - Captures long-range dependencies across entire image
   - Better understanding of spatial relationships
-  - Superior performance on medical images
+  - Superior performance on complex medical images
+  - Attention mechanism highlights important regions
 
 #### Fusion Strategy
-- Concatenate CNN features with Transformer features
-- Dense layers for final classification
-- Dropout for regularization
+- **Feature Concatenation**: InceptionV3 (2048-dim) + ViT (768-dim) = 2816-dim combined vector
+- **Classification Head**: Fully connected layer with 4 output classes
+- **Activation**: Softmax for probability distribution
+- **Framework**: PyTorch 2.1.2
 
 ### Training Details
 
-- **Dataset**: Chest X-ray images (Pneumonia, TB, COVID-19, Normal)
-- **Image Size**: 224x224 pixels
-- **Batch Size**: 32
-- **Optimizer**: Adam
-- **Loss Function**: Categorical Crossentropy
-- **Metrics**: Accuracy, Precision, Recall, AUC
-- **Accuracy**: ~94.2% on test set
+- **Dataset**: Chest X-ray images (COVID-19, Normal, Pneumonia, Tuberculosis)
+- **Classes**: 4 disease categories
+- **Image Preprocessing**: 
+  - Resize to 299×299 (InceptionV3 input)
+  - Normalize with ImageNet statistics
+  - RGB conversion
+- **Augmentation**: Multiple techniques applied during training
+- **Framework**: PyTorch with Hugging Face Transformers
+- **Model File**: `inceptionv3_vit_lung.pth` (~300MB)
+
+### Model Architecture Code
+
+```python
+class MultiStageInceptionViT(nn.Module):
+    def __init__(self, num_classes=4):
+        super().__init__()
+        # InceptionV3 backbone (2048 features)
+        self.backbone_cnn = inception_v3(pretrained=True, aux_logits=True)
+        self.backbone_cnn.fc = nn.Identity()
+        
+        # Vision Transformer (768 features)
+        self.vit = ViTModel.from_pretrained(
+            "google/vit-base-patch16-224-in21k"
+        )
+        
+        # Classifier (2816 → 4 classes)
+        self.fc = nn.Linear(2048 + 768, num_classes)
+    
+    def forward(self, x):
+        # InceptionV3 path (299x299)
+        cnn_features = self.backbone_cnn(x)
+        if not torch.is_tensor(cnn_features):
+            cnn_features = cnn_features.logits
+        
+        # ViT path (resize to 224x224)
+        vit_input = F.interpolate(x, size=(224, 224))
+        vit_features = self.vit(pixel_values=vit_input).pooler_output
+        
+        # Fusion and classification
+        combined = torch.cat((cnn_features, vit_features), dim=1)
+        return self.fc(combined)
+```
 
 ### Model Performance
 
-| Metric | Score |
-|--------|-------|
-| Accuracy | 94.2% |
-| Precision | 93.8% |
-| Recall | 94.5% |
-| F1-Score | 94.1% |
+| Disease Class | Detection Capability |
+|--------------|---------------------|
+| COVID-19 (Corona Virus Disease) | ✓ Trained & Available |
+| Normal | ✓ Trained & Available |
+| Pneumonia | ✓ Trained & Available |
+| Tuberculosis | ✓ Trained & Available |
+
+**Note**: This is a production-ready model trained on real chest X-ray data. Specific performance metrics (accuracy, precision, recall) are available in the training notebook.
 
 ---
 
@@ -379,33 +431,53 @@ FastAPI provides automatic interactive API documentation:
 ```
 Ui/
 ├── backend/
-│   ├── main.py                 # FastAPI application
-│   ├── model_utils.py          # Model architecture & utilities
-│   ├── requirements.txt        # Python dependencies
-│   └── .env.example           # Environment variables template
+│   ├── torch_main.py               # FastAPI application (PyTorch)
+│   ├── app.py                      # Hugging Face Spaces entry point
+│   ├── main.py                     # Legacy TensorFlow backend (deprecated)
+│   ├── model_utils.py              # Legacy model utilities (deprecated)
+│   ├── test_api.py                 # API testing script
+│   ├── requirements.txt            # Python dependencies (PyTorch)
+│   ├── Dockerfile                  # Docker configuration for HF Spaces
+│   ├── .gitattributes              # Git LFS configuration
+│   ├── README_HUGGINGFACE.md       # Hugging Face deployment guide
+│   ├── DEPLOYMENT_QUICK_START.md   # Quick deployment instructions
+│   ├── inception/
+│   │   ├── inceptionv3_vit_lung.pth        # Model weights (~300MB)
+│   │   ├── class_mapping (1).json          # Class labels
+│   │   └── Lung_Disease_MultistageViT_with_inceptionV3_2_0.ipynb  # Training notebook
+│   └── .env.example                # Environment variables template
 │
 ├── src/
 │   ├── components/
-│   │   ├── Navbar.jsx         # Navigation bar
-│   │   ├── Footer.jsx         # Footer component
+│   │   ├── Navbar.jsx              # Navigation bar
+│   │   ├── Footer.jsx              # Footer component
 │   │   ├── PredictionResult.jsx    # Result display
 │   │   └── ProbabilityChart.jsx    # Chart visualization
 │   │
 │   ├── pages/
-│   │   ├── HomePage.jsx       # Landing page
-│   │   ├── DiagnosisPage.jsx  # Diagnosis interface
-│   │   └── ChatbotPage.jsx    # AI chatbot
+│   │   ├── HomePage.jsx            # Landing page
+│   │   ├── DiagnosisPage.jsx       # Diagnosis interface
+│   │   └── ChatbotPage.jsx         # AI chatbot
 │   │
-│   ├── App.jsx                # Main app component
-│   ├── main.jsx               # Entry point
-│   └── index.css              # Global styles
+│   ├── App.jsx                     # Main app component
+│   ├── main.jsx                    # Entry point
+│   └── index.css                   # Global styles
 │
-├── public/                     # Static assets
-├── package.json               # Node dependencies
-├── vite.config.js             # Vite configuration
-├── tailwind.config.js         # Tailwind CSS config
-├── postcss.config.js          # PostCSS config
-└── README.md                  # This file
+├── docs/                            # Documentation
+│   ├── README.md                   # Project overview
+│   ├── GETTING_STARTED.md          # Setup guide
+│   ├── DEVELOPMENT.md              # Development guide
+│   ├── DEPLOYMENT.md               # Deployment guide  
+│   ├── API.md                      # API documentation
+│   ├── PROJECT_STRUCTURE.md        # Detailed structure
+│   └── PROJECT_COMPLETE.md         # Completion report
+│
+├── public/                          # Static assets
+├── package.json                     # Node dependencies
+├── vite.config.js                   # Vite configuration
+├── tailwind.config.js               # Tailwind CSS config
+├── postcss.config.js                # PostCSS config
+└── README.md                        # This file (main documentation)
 ```
 
 ---
