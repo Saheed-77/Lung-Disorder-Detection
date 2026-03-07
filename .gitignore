@@ -27,6 +27,7 @@ __pycache__/
 venv/
 env/
 ENV/
+backend/inception/inceptionv3_vit_lung.pth
 backend/models/*.h5
 backend/models/*.pb
 *.pkl
