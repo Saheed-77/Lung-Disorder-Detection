@@ -81,6 +81,9 @@ const DiagnosisPage = () => {
         },
       })
 
+      console.log('Prediction response:', response.data)
+      console.log('Grad-CAM available:', !!response.data.gradcam)
+      
       setResult(response.data)
       toast.success('Prediction completed!')
     } catch (error) {
@@ -311,6 +314,66 @@ const DiagnosisPage = () => {
                   className="space-y-6"
                 >
                   <PredictionResult result={result} />
+                  
+                  {/* Grad-CAM Heatmap Visualization */}
+                  {result.gradcam && (
+                    <div className="card p-6">
+                      <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center">
+                        <Activity className="w-5 h-5 mr-2 text-primary-600" />
+                        AI Focus Areas (Grad-CAM Visualization)
+                      </h3>
+                      <p className="text-sm text-gray-600 mb-4">
+                        The heatmap below highlights the regions in the X-ray that the AI model focused on to make its prediction. 
+                        Red/yellow areas indicate high attention, while blue/purple areas show less focus.
+                      </p>
+                      
+                      <div className="grid md:grid-cols-2 gap-4">
+                        {/* Original Image */}
+                        <div className="space-y-2">
+                          <p className="text-sm font-semibold text-gray-700">Original X-Ray</p>
+                          <div className="relative rounded-lg overflow-hidden border-2 border-gray-200">
+                            <img
+                              src={preview}
+                              alt="Original X-ray"
+                              className="w-full h-auto"
+                            />
+                          </div>
+                        </div>
+                        
+                        {/* Heatmap Overlay */}
+                        <div className="space-y-2">
+                          <p className="text-sm font-semibold text-gray-700">AI Attention Heatmap</p>
+                          <div className="relative rounded-lg overflow-hidden border-2 border-primary-300">
+                            <img
+                              src={result.gradcam}
+                              alt="Grad-CAM Heatmap"
+                              className="w-full h-auto"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                      
+                      {/* Heatmap Legend */}
+                      <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+                        <p className="text-xs font-semibold text-gray-700 mb-2">Heatmap Legend:</p>
+                        <div className="flex items-center space-x-4 text-xs text-gray-600">
+                          <div className="flex items-center space-x-1">
+                            <div className="w-4 h-4 bg-red-500 rounded"></div>
+                            <span>High attention</span>
+                          </div>
+                          <div className="flex items-center space-x-1">
+                            <div className="w-4 h-4 bg-yellow-500 rounded"></div>
+                            <span>Medium attention</span>
+                          </div>
+                          <div className="flex items-center space-x-1">
+                            <div className="w-4 h-4 bg-blue-500 rounded"></div>
+                            <span>Low attention</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  
                   <ProbabilityChart probabilities={result.probabilities} />
                   
                   {/* Additional Info */}

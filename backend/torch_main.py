@@ -7,6 +7,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
 import torch
 import torch.nn as nn
 from torchvision import transforms
@@ -20,15 +21,36 @@ import logging
 from typing import Dict, List, Optional
 import numpy as np
 import os
+import cv2
+import base64
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Global variables
+model = None
+device = None
+class_mapping = None
+idx_to_class = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler for startup and shutdown"""
+    # Startup
+    logger.info("Starting Lung Disease Detection API (InceptionV3 + ViT)...")
+    load_model()
+    yield
+    # Shutdown
+    logger.info("Shutting down...")
+
+
 app = FastAPI(
     title="Lung Disease Detection API - InceptionV3 + ViT",
     description="AI-powered lung disease detection using InceptionV3 + Vision Transformer",
-    version="2.0.0"
+    version="2.0.0",
+    lifespan=lifespan
 )
 
 # CORS middleware
@@ -160,6 +182,113 @@ def preprocess_image(image: Image.Image) -> torch.Tensor:
     return img_tensor
 
 
+class GradCAM:
+    """Gradient-weighted Class Activation Mapping for visualization"""
+    def __init__(self, model, target_layer):
+        self.model = model
+        self.target_layer = target_layer
+        self.gradients = None
+        self.activations = None
+        
+        # Register hooks
+        self.target_layer.register_forward_hook(self.save_activation)
+        self.target_layer.register_full_backward_hook(self.save_gradient)
+    
+    def save_activation(self, module, input, output):
+        self.activations = output.detach()
+    
+    def save_gradient(self, module, grad_input, grad_output):
+        self.gradients = grad_output[0].detach()
+    
+    def generate_cam(self, input_tensor, target_class=None):
+        """Generate CAM heatmap"""
+        # Forward pass
+        output = self.model(input_tensor)
+        
+        if target_class is None:
+            target_class = output.argmax(dim=1).item()
+        
+        # Backward pass
+        self.model.zero_grad()
+        target = output[0, target_class]
+        target.backward()
+        
+        # Generate CAM
+        gradients = self.gradients[0]  # [C, H, W]
+        activations = self.activations[0]  # [C, H, W]
+        
+        # Global average pooling on gradients
+        weights = gradients.mean(dim=(1, 2))  # [C]
+        
+        # Weighted combination of activation maps
+        cam = torch.zeros(activations.shape[1:], dtype=torch.float32)
+        for i, w in enumerate(weights):
+            cam += w * activations[i]
+        
+        # ReLU and normalize
+        cam = torch.relu(cam)
+        cam = cam - cam.min()
+        if cam.max() > 0:
+            cam = cam / cam.max()
+        
+        return cam.cpu().numpy(), target_class
+
+
+def generate_gradcam_overlay(image: Image.Image, model, img_tensor, predicted_class):
+    """Generate Grad-CAM heatmap overlay on original image"""
+    try:
+        # Temporarily set model to train mode to enable gradient computation
+        was_training = model.training
+        model.train()
+        
+        # Target the last convolutional layer in InceptionV3
+        target_layer = model.backbone_cnn.Mixed_7c
+        
+        # Create GradCAM object
+        gradcam = GradCAM(model, target_layer)
+        
+        # Generate CAM
+        cam, _ = gradcam.generate_cam(img_tensor, target_class=predicted_class)
+        
+        # Restore model mode
+        if not was_training:
+            model.eval()
+        
+        # Resize CAM to match original image size
+        cam = cv2.resize(cam, (image.width, image.height))
+        
+        # Convert to heatmap
+        heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
+        heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+        
+        # Convert original image to numpy
+        image_np = np.array(image.convert('RGB'))
+        
+        # Resize image if needed
+        if image_np.shape[:2] != heatmap.shape[:2]:
+            image_np = cv2.resize(image_np, (heatmap.shape[1], heatmap.shape[0]))
+        
+        # Overlay heatmap on image (40% heatmap, 60% original)
+        overlay = cv2.addWeighted(image_np, 0.6, heatmap, 0.4, 0)
+        
+        # Convert to PIL Image
+        overlay_img = Image.fromarray(overlay)
+        
+        # Convert to base64
+        buffered = io.BytesIO()
+        overlay_img.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        
+        logger.info(f"Grad-CAM overlay generated successfully, size: {len(img_str)} bytes")
+        
+        return f"data:image/png;base64,{img_str}"
+        
+    except Exception as e:
+        logger.error(f"Error generating Grad-CAM: {str(e)}")
+        logger.exception(e)
+        return None
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize model on startup"""
@@ -220,6 +349,7 @@ async def predict(file: UploadFile = File(...)):
         # Read and process image
         contents = await file.read()
         image = Image.open(io.BytesIO(contents))
+        original_image = image.copy()  # Keep original for Grad-CAM
         
         logger.info(f"Processing image: {file.filename}, size: {image.size}, mode: {image.mode}")
         
@@ -227,7 +357,7 @@ async def predict(file: UploadFile = File(...)):
         img_tensor = preprocess_image(image)
         img_tensor = img_tensor.to(device)
         
-        # Get prediction
+        # Get prediction (without gradients for speed)
         start_time = time.time()
         
         with torch.no_grad():
@@ -248,12 +378,26 @@ async def predict(file: UploadFile = File(...)):
             for i in range(len(probs))
         }
         
+        # Generate Grad-CAM heatmap (requires gradients, so outside no_grad context)
+        logger.info("Generating Grad-CAM visualization...")
+        try:
+            # Create a fresh tensor with gradients enabled for Grad-CAM
+            img_tensor_grad = preprocess_image(original_image).to(device)
+            img_tensor_grad.requires_grad = True
+            
+            heatmap_base64 = generate_gradcam_overlay(original_image, model, img_tensor_grad, predicted_idx)
+            logger.info(f"Grad-CAM generated: {'Success' if heatmap_base64 else 'Failed'}")
+        except Exception as e:
+            logger.error(f"Grad-CAM generation failed: {str(e)}")
+            heatmap_base64 = None
+        
         result = {
             "prediction": predicted_class,
             "confidence": confidence,
             "probabilities": prob_dict,
             "inference_time": round(inference_time, 3),
-            "model": "InceptionV3 + ViT"
+            "model": "InceptionV3 + ViT",
+            "gradcam": heatmap_base64  # Add Grad-CAM heatmap
         }
         
         logger.info(f"Prediction: {predicted_class}, Confidence: {confidence:.2%}")
@@ -640,4 +784,4 @@ Ask me anything! I'm here to help. 😊"""
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")
