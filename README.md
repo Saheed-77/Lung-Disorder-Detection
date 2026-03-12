@@ -185,6 +185,8 @@ The frontend will be available at `http://localhost:3000`
 cd backend
 
 # Create virtual environment
+# Windows PowerShell if `python` is not on PATH:
+# py -3.10 -m venv venv
 python -m venv venv
 
 # Activate virtual environment
@@ -198,6 +200,14 @@ pip install -r requirements.txt
 
 # Start FastAPI server
 python main.py
+```
+
+On Windows, if `python` is not recognized but Python is installed, use the launcher commands instead:
+
+```powershell
+py -3.10 -m venv venv
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+.\venv\Scripts\python.exe main.py
 ```
 
 The backend API will be available at `http://localhost:8000`

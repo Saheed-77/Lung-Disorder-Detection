@@ -18,12 +18,21 @@ if ($LASTEXITCODE -eq 0) {
 
 # Check Python
 Write-Host "`n[2/5] Checking Python..." -ForegroundColor Yellow
+$pythonCommand = $null
 $pythonVersion = python --version 2>$null
 if ($LASTEXITCODE -eq 0) {
+    $pythonCommand = "python"
     Write-Host "✓ Python found: $pythonVersion" -ForegroundColor Green
 } else {
-    Write-Host "✗ Python not found. Please install Python 3.10+ from https://python.org/" -ForegroundColor Red
-    exit 1
+    $pythonVersion = py -3.10 --version 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $pythonCommand = "py -3.10"
+        Write-Host "✓ Python found via launcher: $pythonVersion" -ForegroundColor Green
+    } else {
+        Write-Host "✗ Python not found. Please install Python 3.10+ from https://python.org/" -ForegroundColor Red
+        Write-Host "  On Windows, you can also use the Python launcher command: py -3.10" -ForegroundColor Yellow
+        exit 1
+    }
 }
 
 # Install Frontend Dependencies
@@ -43,7 +52,11 @@ Set-Location backend
 # Create virtual environment if it doesn't exist
 if (-not (Test-Path "venv")) {
     Write-Host "Creating Python virtual environment..." -ForegroundColor Cyan
-    python -m venv venv
+    if ($pythonCommand -eq "python") {
+        python -m venv venv
+    } else {
+        py -3.10 -m venv venv
+    }
 }
 
 # Activate virtual environment and install dependencies
