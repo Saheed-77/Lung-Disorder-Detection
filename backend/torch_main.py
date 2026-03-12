@@ -24,6 +24,9 @@ import os
 import cv2
 import base64
 
+# Import chat service for Gemini AI integration
+from chat_service import get_gemini_response
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -418,11 +421,16 @@ class ChatMessage(BaseModel):
 @app.post("/api/chat")
 async def chat(chat_msg: ChatMessage):
     """
-    AI chatbot endpoint for medical Q&A
+    AI chatbot endpoint for medical Q&A using Google Gemini
     """
     try:
-        user_message = chat_msg.message.lower()
-        response = get_chatbot_response(user_message)
+        user_message = chat_msg.message
+        history = chat_msg.history if chat_msg.history else []
+        
+        # Use Gemini AI for intelligent responses
+        response = get_gemini_response(user_message, history)
+        
+        logger.info(f"Chat request processed successfully")
         return JSONResponse(content={"response": response})
     
     except Exception as e:
