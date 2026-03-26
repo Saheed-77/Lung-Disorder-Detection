@@ -41,6 +41,13 @@ idx_to_class = None
 SUPPORTED_IMAGE_FORMATS = {"JPEG", "JPG", "PNG", "WEBP", "BMP", "TIFF"}
 CONVERT_TO_PNG_FORMATS = {"WEBP", "BMP", "TIFF"}
 XRAY_LIKELIHOOD_THRESHOLD = 0.56
+MAX_COLORFULNESS_THRESHOLD = 0.16
+MAX_SATURATION_THRESHOLD = 0.18
+MIN_CONTRAST_THRESHOLD = 0.18
+MIN_ENTROPY_THRESHOLD = 0.45
+MIN_CENTER_TO_CORNER_DIFF = 0.02
+MIN_EDGE_DENSITY = 0.02
+MAX_EDGE_DENSITY = 0.25
 PREDICTION_CONFIDENCE_THRESHOLD = 0.60
 MIN_TOP2_GAP_THRESHOLD = 0.12
 ENABLE_TTA = True
@@ -279,18 +286,32 @@ def estimate_xray_likelihood(image: Image.Image) -> Dict[str, float]:
 
     if gray.size == 0:
         return {
+            "is_xray": False,
             "score": 0.0,
             "threshold": XRAY_LIKELIHOOD_THRESHOLD,
             "grayscale_score": 0.0,
             "contrast_score": 0.0,
             "histogram_entropy_score": 0.0,
             "edge_density_score": 0.0,
+            "saturation_score": 0.0,
+            "center_pattern_score": 0.0,
+            "colorfulness": 1.0,
+            "saturation": 1.0,
+            "contrast": 0.0,
+            "histogram_entropy": 0.0,
+            "edge_density": 0.0,
+            "center_to_corner_diff": 0.0,
+            "reject_reasons": ["Empty or invalid image content"],
         }
 
     rg_diff = np.abs(rgb[:, :, 0] - rgb[:, :, 1])
     yb_diff = np.abs(0.5 * (rgb[:, :, 0] + rgb[:, :, 1]) - rgb[:, :, 2])
     colorfulness = float(np.mean(rg_diff + yb_diff) / 255.0)
     grayscale_score = float(np.clip(1.0 - (colorfulness * 1.8), 0.0, 1.0))
+
+    hsv = cv2.cvtColor(rgb.astype(np.uint8), cv2.COLOR_RGB2HSV)
+    saturation = float(hsv[:, :, 1].mean() / 255.0)
+    saturation_score = float(np.clip(1.0 - (saturation * 2.5), 0.0, 1.0))
 
     p5, p95 = np.percentile(gray, [5, 95])
     contrast_score = float(np.clip((p95 - p5) / 255.0, 0.0, 1.0))
@@ -304,20 +325,68 @@ def estimate_xray_likelihood(image: Image.Image) -> Dict[str, float]:
     edge_density = float(edges.mean() / 255.0)
     edge_density_score = float(np.clip(1.0 - abs(edge_density - 0.11) / 0.11, 0.0, 1.0))
 
-    score = (
-        0.35 * grayscale_score
-        + 0.30 * contrast_score
-        + 0.20 * histogram_entropy_score
-        + 0.15 * edge_density_score
+    h, w = gray.shape
+    ch0, ch1 = int(h * 0.3), int(h * 0.7)
+    cw0, cw1 = int(w * 0.3), int(w * 0.7)
+    center_region = gray[ch0:ch1, cw0:cw1]
+
+    ph, pw = max(1, int(h * 0.15)), max(1, int(w * 0.15))
+    corners = np.concatenate(
+        [
+            gray[:ph, :pw].ravel(),
+            gray[:ph, -pw:].ravel(),
+            gray[-ph:, :pw].ravel(),
+            gray[-ph:, -pw:].ravel(),
+        ]
     )
 
+    center_mean = float(center_region.mean()) if center_region.size else 0.0
+    corner_mean = float(corners.mean()) if corners.size else 0.0
+    center_to_corner_diff = float((center_mean - corner_mean) / 255.0)
+    center_pattern_score = float(np.clip((center_to_corner_diff + 0.05) / 0.2, 0.0, 1.0))
+
+    score = (
+        0.25 * grayscale_score
+        + 0.10 * saturation_score
+        + 0.25 * contrast_score
+        + 0.15 * histogram_entropy_score
+        + 0.10 * edge_density_score
+        + 0.15 * center_pattern_score
+    )
+
+    reject_reasons = []
+    if colorfulness > MAX_COLORFULNESS_THRESHOLD:
+        reject_reasons.append("Image is too colorful for a chest X-ray")
+    if saturation > MAX_SATURATION_THRESHOLD:
+        reject_reasons.append("Image saturation is too high for a radiograph")
+    if contrast_score < MIN_CONTRAST_THRESHOLD:
+        reject_reasons.append("Image contrast is too low for reliable X-ray interpretation")
+    if histogram_entropy_score < MIN_ENTROPY_THRESHOLD:
+        reject_reasons.append("Image texture distribution is not consistent with chest radiographs")
+    if edge_density < MIN_EDGE_DENSITY or edge_density > MAX_EDGE_DENSITY:
+        reject_reasons.append("Image edge structure is atypical for chest X-ray anatomy")
+    if center_to_corner_diff < MIN_CENTER_TO_CORNER_DIFF:
+        reject_reasons.append("Image intensity pattern does not match chest X-ray framing")
+
+    is_xray = bool((score >= XRAY_LIKELIHOOD_THRESHOLD) and not reject_reasons)
+
     return {
+        "is_xray": is_xray,
         "score": float(score),
         "threshold": XRAY_LIKELIHOOD_THRESHOLD,
         "grayscale_score": grayscale_score,
         "contrast_score": contrast_score,
         "histogram_entropy_score": histogram_entropy_score,
         "edge_density_score": edge_density_score,
+        "saturation_score": saturation_score,
+        "center_pattern_score": center_pattern_score,
+        "colorfulness": colorfulness,
+        "saturation": saturation,
+        "contrast": float(contrast_score),
+        "histogram_entropy": float(histogram_entropy_score),
+        "edge_density": edge_density,
+        "center_to_corner_diff": center_to_corner_diff,
+        "reject_reasons": reject_reasons,
     }
 
 
@@ -494,12 +563,15 @@ async def predict(file: UploadFile = File(...)):
 
         # Guardrail: ensure upload looks like a chest X-ray before inference
         xray_check = estimate_xray_likelihood(image_for_precheck)
-        if xray_check["score"] < XRAY_LIKELIHOOD_THRESHOLD:
+        if not xray_check.get("is_xray", False):
+            reasons = xray_check.get("reject_reasons") or [
+                "Image does not satisfy chest X-ray pre-check criteria"
+            ]
             raise HTTPException(
                 status_code=400,
                 detail=(
                     "Uploaded image does not appear to be a chest X-ray. "
-                    "Please upload a valid chest X-ray image."
+                    f"Reasons: {'; '.join(reasons)}"
                 ),
             )
 
