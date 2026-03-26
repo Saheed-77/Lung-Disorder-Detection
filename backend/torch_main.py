@@ -13,7 +13,7 @@ import torch.nn as nn
 from torchvision import transforms
 from transformers import ViTModel
 from torchvision.models import inception_v3
-from PIL import Image
+from PIL import Image, ImageOps, UnidentifiedImageError
 import io
 import json
 import time
@@ -36,6 +36,14 @@ model = None
 device = None
 class_mapping = None
 idx_to_class = None
+
+# Upload validation and preprocessing settings
+SUPPORTED_IMAGE_FORMATS = {"JPEG", "JPG", "PNG", "WEBP", "BMP", "TIFF"}
+CONVERT_TO_PNG_FORMATS = {"WEBP", "BMP", "TIFF"}
+XRAY_LIKELIHOOD_THRESHOLD = 0.56
+PREDICTION_CONFIDENCE_THRESHOLD = 0.60
+MIN_TOP2_GAP_THRESHOLD = 0.12
+ENABLE_TTA = True
 
 
 @asynccontextmanager
@@ -183,6 +191,134 @@ def preprocess_image(image: Image.Image) -> torch.Tensor:
     # Apply transforms and add batch dimension
     img_tensor = transform(image).unsqueeze(0)
     return img_tensor
+
+
+def normalize_class_name(class_name: str) -> str:
+    """Normalize class names for consistent API responses."""
+    mapping = {
+        "Corona Virus Disease": "COVID-19",
+    }
+    return mapping.get(class_name, class_name)
+
+
+def decode_inference_image(contents: bytes) -> Image.Image:
+    """Decode image for inference while preserving pixel content as much as possible."""
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    try:
+        with Image.open(io.BytesIO(contents)) as img:
+            image = ImageOps.exif_transpose(img).copy()
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=400, detail="Unsupported or corrupted image file")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid image data: {str(exc)}")
+
+    return image
+
+
+def validate_and_convert_upload(contents: bytes, filename: str) -> tuple[Image.Image, Dict[str, object]]:
+    """Validate uploaded file format and prepare standardized image for pre-checks only."""
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    try:
+        with Image.open(io.BytesIO(contents)) as probe:
+            detected_format = (probe.format or "").upper()
+            detected_mode = probe.mode
+            probe.verify()
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=400, detail="Unsupported or corrupted image file")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid image data: {str(exc)}")
+
+    if detected_format not in SUPPORTED_IMAGE_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported image format '{detected_format or 'UNKNOWN'}'. "
+                f"Supported formats: {', '.join(sorted(SUPPORTED_IMAGE_FORMATS))}"
+            ),
+        )
+
+    image = decode_inference_image(contents)
+
+    conversion_notes = []
+    processed_format = detected_format
+
+    if image.mode not in {"RGB", "L"}:
+        image = image.convert("RGB")
+        conversion_notes.append(f"Converted image mode from {detected_mode} to RGB")
+
+    if detected_format in CONVERT_TO_PNG_FORMATS:
+        converted_buffer = io.BytesIO()
+        image.save(converted_buffer, format="PNG")
+        converted_buffer.seek(0)
+        image = Image.open(converted_buffer).copy()
+        processed_format = "PNG"
+        conversion_notes.append(f"Converted file format from {detected_format} to PNG")
+
+    return image.copy(), {
+        "filename": filename,
+        "original_format": detected_format,
+        "processed_format": processed_format,
+        "original_mode": detected_mode,
+        "processed_mode": image.mode,
+        "was_converted": processed_format != detected_format or image.mode != detected_mode,
+        "conversion_notes": conversion_notes,
+    }
+
+
+def estimate_xray_likelihood(image: Image.Image) -> Dict[str, float]:
+    """
+    Compute a lightweight chest X-ray likelihood score from visual characteristics.
+    This is a heuristic guardrail, not a diagnostic model.
+    """
+    gray = np.asarray(image.convert("L"), dtype=np.float32)
+    rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
+
+    if gray.size == 0:
+        return {
+            "score": 0.0,
+            "threshold": XRAY_LIKELIHOOD_THRESHOLD,
+            "grayscale_score": 0.0,
+            "contrast_score": 0.0,
+            "histogram_entropy_score": 0.0,
+            "edge_density_score": 0.0,
+        }
+
+    rg_diff = np.abs(rgb[:, :, 0] - rgb[:, :, 1])
+    yb_diff = np.abs(0.5 * (rgb[:, :, 0] + rgb[:, :, 1]) - rgb[:, :, 2])
+    colorfulness = float(np.mean(rg_diff + yb_diff) / 255.0)
+    grayscale_score = float(np.clip(1.0 - (colorfulness * 1.8), 0.0, 1.0))
+
+    p5, p95 = np.percentile(gray, [5, 95])
+    contrast_score = float(np.clip((p95 - p5) / 255.0, 0.0, 1.0))
+
+    hist, _ = np.histogram(gray, bins=32, range=(0, 255), density=True)
+    non_zero = hist[hist > 0]
+    entropy = float(-(non_zero * np.log2(non_zero)).sum())
+    histogram_entropy_score = float(np.clip(entropy / 5.0, 0.0, 1.0))
+
+    edges = cv2.Canny(gray.astype(np.uint8), threshold1=50, threshold2=150)
+    edge_density = float(edges.mean() / 255.0)
+    edge_density_score = float(np.clip(1.0 - abs(edge_density - 0.11) / 0.11, 0.0, 1.0))
+
+    score = (
+        0.35 * grayscale_score
+        + 0.30 * contrast_score
+        + 0.20 * histogram_entropy_score
+        + 0.15 * edge_density_score
+    )
+
+    return {
+        "score": float(score),
+        "threshold": XRAY_LIKELIHOOD_THRESHOLD,
+        "grayscale_score": grayscale_score,
+        "contrast_score": contrast_score,
+        "histogram_entropy_score": histogram_entropy_score,
+        "edge_density_score": edge_density_score,
+    }
 
 
 class GradCAM:
@@ -345,26 +481,50 @@ async def predict(file: UploadFile = File(...)):
         if model is None:
             raise HTTPException(status_code=503, detail="Model not loaded")
         
-        # Validate file type
-        if not file.content_type.startswith('image/'):
+        # Validate content-type when provided by client
+        if file.content_type and not file.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="File must be an image")
         
-        # Read and process image
+        # Read, validate, and standardize image format
         contents = await file.read()
-        image = Image.open(io.BytesIO(contents))
+        image_for_precheck, upload_meta = validate_and_convert_upload(contents, file.filename or "unknown")
+
+        # Keep a separate image for model inference to avoid pre-check transformation side-effects
+        image = decode_inference_image(contents)
+
+        # Guardrail: ensure upload looks like a chest X-ray before inference
+        xray_check = estimate_xray_likelihood(image_for_precheck)
+        if xray_check["score"] < XRAY_LIKELIHOOD_THRESHOLD:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Uploaded image does not appear to be a chest X-ray. "
+                    "Please upload a valid chest X-ray image."
+                ),
+            )
+
         original_image = image.copy()  # Keep original for Grad-CAM
         
-        logger.info(f"Processing image: {file.filename}, size: {image.size}, mode: {image.mode}")
+        logger.info(
+            f"Processing image: {file.filename}, size: {image.size}, mode: {image.mode}, "
+            f"format: {upload_meta['original_format']} -> {upload_meta['processed_format']}, "
+            f"xray_score: {xray_check['score']:.3f}"
+        )
         
         # Preprocess image
-        img_tensor = preprocess_image(image)
-        img_tensor = img_tensor.to(device)
+        img_tensor = preprocess_image(image).to(device)
         
         # Get prediction (without gradients for speed)
         start_time = time.time()
         
         with torch.no_grad():
-            outputs = model(img_tensor)
+            if ENABLE_TTA:
+                mirrored_image = ImageOps.mirror(image)
+                img_tensor_mirror = preprocess_image(mirrored_image).to(device)
+                outputs = (model(img_tensor) + model(img_tensor_mirror)) / 2.0
+            else:
+                outputs = model(img_tensor)
+
             probabilities = torch.nn.functional.softmax(outputs, dim=1)
             probs = probabilities[0].cpu().numpy()
             predicted_idx = outputs.argmax(dim=1).item()
@@ -372,14 +532,35 @@ async def predict(file: UploadFile = File(...)):
         inference_time = time.time() - start_time
         
         # Get predicted class name
-        predicted_class = idx_to_class[predicted_idx]
+        raw_predicted_class = idx_to_class[predicted_idx]
+        predicted_class = normalize_class_name(raw_predicted_class)
         confidence = float(probs[predicted_idx])
+
+        sorted_indices = np.argsort(probs)[::-1]
+        top2_idx = int(sorted_indices[1]) if len(sorted_indices) > 1 else predicted_idx
+        top2_gap = float(probs[predicted_idx] - probs[top2_idx])
+        confidence_pass = confidence >= PREDICTION_CONFIDENCE_THRESHOLD
+        margin_pass = top2_gap >= MIN_TOP2_GAP_THRESHOLD
+        is_reliable_prediction = bool(confidence_pass and margin_pass)
         
         # Create probability dictionary with class names
         prob_dict = {
-            idx_to_class[i]: float(probs[i]) 
+            normalize_class_name(idx_to_class[i]): float(probs[i])
             for i in range(len(probs))
         }
+
+        # Merge any duplicate keys caused by class-name normalization
+        merged_prob_dict = {}
+        for class_name, probability in prob_dict.items():
+            merged_prob_dict[class_name] = merged_prob_dict.get(class_name, 0.0) + probability
+
+        top_predictions = [
+            {
+                "class": normalize_class_name(idx_to_class[int(i)]),
+                "probability": float(probs[int(i)]),
+            }
+            for i in sorted_indices[:2]
+        ]
         
         # Generate Grad-CAM heatmap (requires gradients, so outside no_grad context)
         logger.info("Generating Grad-CAM visualization...")
@@ -395,18 +576,29 @@ async def predict(file: UploadFile = File(...)):
             heatmap_base64 = None
         
         result = {
-            "prediction": predicted_class,
+            "prediction": predicted_class if is_reliable_prediction else "Inconclusive",
+            "raw_prediction": predicted_class,
             "confidence": confidence,
-            "probabilities": prob_dict,
+            "probabilities": merged_prob_dict,
+            "top_predictions": top_predictions,
+            "is_reliable_prediction": is_reliable_prediction,
+            "confidence_threshold": PREDICTION_CONFIDENCE_THRESHOLD,
+            "top2_gap": top2_gap,
+            "top2_gap_threshold": MIN_TOP2_GAP_THRESHOLD,
             "inference_time": round(inference_time, 3),
             "model": "InceptionV3 + ViT",
-            "gradcam": heatmap_base64  # Add Grad-CAM heatmap
+            "tta_enabled": ENABLE_TTA,
+            "gradcam": heatmap_base64,
+            "upload": upload_meta,
+            "xray_check": xray_check,
         }
         
         logger.info(f"Prediction: {predicted_class}, Confidence: {confidence:.2%}")
         
         return JSONResponse(content=result)
     
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Prediction error: {str(e)}")
         logger.exception(e)

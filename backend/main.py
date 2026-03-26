@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps, UnidentifiedImageError
 import io
 import time
 from typing import Dict, List, Optional
@@ -31,6 +31,10 @@ app.add_middleware(
 # Disease classes
 CLASSES = ['Normal', 'Pneumonia', 'Tuberculosis', 'COVID-19']
 
+SUPPORTED_IMAGE_FORMATS = {"JPEG", "JPG", "PNG", "WEBP", "BMP", "TIFF"}
+CONVERT_TO_PNG_FORMATS = {"WEBP", "BMP", "TIFF"}
+XRAY_LIKELIHOOD_THRESHOLD = 0.56
+
 # Model placeholder (replace with actual model loading)
 model = None
 
@@ -57,6 +61,124 @@ def preprocess_image(image: Image.Image) -> np.ndarray:
     img_array = np.expand_dims(img_array, axis=0)
     
     return img_array
+
+
+def decode_inference_image(contents: bytes) -> Image.Image:
+    """Decode image for inference while preserving pixel content as much as possible."""
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    try:
+        with Image.open(io.BytesIO(contents)) as img:
+            image = ImageOps.exif_transpose(img).copy()
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=400, detail="Unsupported or corrupted image file")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid image data: {str(exc)}")
+
+    return image
+
+
+def validate_and_convert_upload(contents: bytes, filename: str) -> tuple[Image.Image, Dict[str, object]]:
+    """Validate image file content and normalize format for pre-checking only."""
+    if not contents:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    try:
+        with Image.open(io.BytesIO(contents)) as probe:
+            detected_format = (probe.format or "").upper()
+            detected_mode = probe.mode
+            probe.verify()
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=400, detail="Unsupported or corrupted image file")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid image data: {str(exc)}")
+
+    if detected_format not in SUPPORTED_IMAGE_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported image format '{detected_format or 'UNKNOWN'}'. "
+                f"Supported formats: {', '.join(sorted(SUPPORTED_IMAGE_FORMATS))}"
+            ),
+        )
+
+    image = decode_inference_image(contents)
+
+    conversion_notes = []
+    processed_format = detected_format
+
+    if image.mode not in {"RGB", "L"}:
+        image = image.convert("RGB")
+        conversion_notes.append(f"Converted image mode from {detected_mode} to RGB")
+
+    if detected_format in CONVERT_TO_PNG_FORMATS:
+        converted_buffer = io.BytesIO()
+        image.save(converted_buffer, format="PNG")
+        converted_buffer.seek(0)
+        image = Image.open(converted_buffer).copy()
+        processed_format = "PNG"
+        conversion_notes.append(f"Converted file format from {detected_format} to PNG")
+
+    return image.copy(), {
+        "filename": filename,
+        "original_format": detected_format,
+        "processed_format": processed_format,
+        "original_mode": detected_mode,
+        "processed_mode": image.mode,
+        "was_converted": processed_format != detected_format or image.mode != detected_mode,
+        "conversion_notes": conversion_notes,
+    }
+
+
+def estimate_xray_likelihood(image: Image.Image) -> Dict[str, float]:
+    """Heuristic pre-check to reject clearly non-X-ray uploads before classification."""
+    gray = np.asarray(image.convert("L"), dtype=np.float32)
+    rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
+
+    if gray.size == 0:
+        return {
+            "score": 0.0,
+            "threshold": XRAY_LIKELIHOOD_THRESHOLD,
+            "grayscale_score": 0.0,
+            "contrast_score": 0.0,
+            "histogram_entropy_score": 0.0,
+            "edge_density_score": 0.0,
+        }
+
+    rg_diff = np.abs(rgb[:, :, 0] - rgb[:, :, 1])
+    yb_diff = np.abs(0.5 * (rgb[:, :, 0] + rgb[:, :, 1]) - rgb[:, :, 2])
+    colorfulness = float(np.mean(rg_diff + yb_diff) / 255.0)
+    grayscale_score = float(np.clip(1.0 - (colorfulness * 1.8), 0.0, 1.0))
+
+    p5, p95 = np.percentile(gray, [5, 95])
+    contrast_score = float(np.clip((p95 - p5) / 255.0, 0.0, 1.0))
+
+    hist, _ = np.histogram(gray, bins=32, range=(0, 255), density=True)
+    non_zero = hist[hist > 0]
+    entropy = float(-(non_zero * np.log2(non_zero)).sum())
+    histogram_entropy_score = float(np.clip(entropy / 5.0, 0.0, 1.0))
+
+    grad_x = np.abs(np.diff(gray, axis=1)).mean()
+    grad_y = np.abs(np.diff(gray, axis=0)).mean()
+    edge_density = float((grad_x + grad_y) / (2.0 * 255.0))
+    edge_density_score = float(np.clip(1.0 - abs(edge_density - 0.11) / 0.11, 0.0, 1.0))
+
+    score = (
+        0.35 * grayscale_score
+        + 0.30 * contrast_score
+        + 0.20 * histogram_entropy_score
+        + 0.15 * edge_density_score
+    )
+
+    return {
+        "score": float(score),
+        "threshold": XRAY_LIKELIHOOD_THRESHOLD,
+        "grayscale_score": grayscale_score,
+        "contrast_score": contrast_score,
+        "histogram_entropy_score": histogram_entropy_score,
+        "edge_density_score": edge_density_score,
+    }
 
 def get_mock_prediction(image_array: np.ndarray) -> Dict:
     """
@@ -129,16 +251,31 @@ async def predict(file: UploadFile = File(...)):
         JSON with prediction, confidence, and probabilities
     """
     try:
-        # Validate file type
-        if not file.content_type.startswith('image/'):
+        # Validate file type when sent by the client
+        if file.content_type and not file.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="File must be an image")
         
-        # Read and process image
+        # Read, validate, and standardize image
         contents = await file.read()
-        image = Image.open(io.BytesIO(contents))
+        image_for_precheck, upload_meta = validate_and_convert_upload(contents, file.filename or "unknown")
+
+        # Keep inference decode separate from pre-check transformations
+        image = decode_inference_image(contents)
+
+        # Ensure uploaded image appears to be a chest X-ray
+        xray_check = estimate_xray_likelihood(image_for_precheck)
+        if xray_check["score"] < XRAY_LIKELIHOOD_THRESHOLD:
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded image does not appear to be a chest X-ray. Please upload a valid chest X-ray image."
+            )
         
         # Log image info
-        logger.info(f"Processing image: {file.filename}, size: {image.size}")
+        logger.info(
+            f"Processing image: {file.filename}, size: {image.size}, format: "
+            f"{upload_meta['original_format']} -> {upload_meta['processed_format']}, "
+            f"xray_score: {xray_check['score']:.3f}"
+        )
         
         # Preprocess image
         img_array = preprocess_image(image)
@@ -157,11 +294,15 @@ async def predict(file: UploadFile = File(...)):
         
         inference_time = time.time() - start_time
         result['inference_time'] = round(inference_time, 3)
+        result['upload'] = upload_meta
+        result['xray_check'] = xray_check
         
         logger.info(f"Prediction: {result['prediction']}, Confidence: {result['confidence']:.2%}")
         
         return JSONResponse(content=result)
     
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Prediction error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")

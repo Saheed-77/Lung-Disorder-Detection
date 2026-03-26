@@ -392,9 +392,14 @@ const DiagnosisPage = () => {
                       <div className="bg-gray-50 p-4 rounded-lg">
                         <div className="flex items-center space-x-2 text-gray-600 mb-1">
                           <TrendingUp className="w-4 h-4" />
-                          <span className="text-sm">Model Accuracy</span>
+                          <span className="text-sm">Prediction Reliability</span>
                         </div>
-                        <p className="text-xl font-bold text-gray-900">94.2%</p>
+                        <p className="text-xl font-bold text-gray-900">
+                          {((result.confidence || 0) * 100).toFixed(2)}%
+                        </p>
+                        <p className="text-xs text-gray-500 mt-1">
+                          {result.is_reliable_prediction ? 'Reliable prediction' : 'Low reliability / inconclusive'}
+                        </p>
                       </div>
                     </div>
                   </div>

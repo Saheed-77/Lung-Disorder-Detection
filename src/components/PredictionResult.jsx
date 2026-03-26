@@ -14,6 +14,7 @@ const PredictionResult = ({ result }) => {
       'Pneumonia': { bg: 'bg-red-50', border: 'border-red-200', text: 'text-red-700', icon: 'text-red-500' },
       'Tuberculosis': { bg: 'bg-orange-50', border: 'border-orange-200', text: 'text-orange-700', icon: 'text-orange-500' },
       'COVID-19': { bg: 'bg-purple-50', border: 'border-purple-200', text: 'text-purple-700', icon: 'text-purple-500' },
+      'Inconclusive': { bg: 'bg-slate-50', border: 'border-slate-300', text: 'text-slate-700', icon: 'text-slate-500' },
     }
     return colors[prediction] || colors['Normal']
   }
@@ -66,13 +67,20 @@ const PredictionResult = ({ result }) => {
              confidence > 60 ? 'Moderate confidence - Consider additional testing' : 
              'Low confidence - Further examination recommended'}
           </p>
+          {result.prediction === 'Inconclusive' && (
+            <p className={`text-xs ${colors.text} mt-2 font-medium`}>
+              Prediction marked inconclusive due to low confidence or close class probabilities.
+            </p>
+          )}
         </div>
 
         <div className={`border-t-2 ${colors.border} pt-4`}>
           <p className={`text-sm ${colors.text}`}>
-            <strong>Interpretation:</strong> The AI model has analyzed the chest X-ray and 
-            detected patterns consistent with {result.prediction.toLowerCase()}. 
-            {result.prediction !== 'Normal' && 
+            <strong>Interpretation:</strong> The AI model has analyzed the chest X-ray and
+            {result.prediction === 'Inconclusive'
+              ? ' found no sufficiently reliable single-class prediction. Additional clinical review and testing are recommended.'
+              : ` detected patterns consistent with ${result.prediction.toLowerCase()}.`}
+            {result.prediction !== 'Normal' && result.prediction !== 'Inconclusive' &&
               ' Please consult with a healthcare professional for proper diagnosis and treatment.'}
           </p>
         </div>
